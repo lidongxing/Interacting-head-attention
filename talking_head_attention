@@ -1,0 +1,183 @@
+class TalkingHeadsAttention():
+
+	def __init__(self, n_head, d_model, dropout=0.1, **kwargs):
+		super(TalkingHeadsAttention, self).__init__(**kwargs)
+		self.n_head = n_head
+		self.d_k = self.d_v = d_k = d_v = d_model // n_head
+
+		self.qs_layer = Dense(n_head * d_k, use_bias=False)
+		self.ks_layer = Dense(n_head * d_k, use_bias=False)
+		self.vs_layer = Dense(n_head * d_v, use_bias=False)
+
+		self.ip1_dense = Dense(self.n_head * self.n_head, use_bias=False)
+		self.ip2_dense = Dense(self.n_head, use_bias=False)
+
+		self.dropout = Dropout(dropout)
+		self.w_o = TimeDistributed(Dense(d_model))
+	def __call__(self, q, k, v, mask=None):
+
+		'''
+		:param q: [B,lq,dmodel]
+		:param k: [B,lk,dmodel]
+		:param v: [B,lk,dmodel
+		:param mask: [B,lq]
+		:return:
+		'''
+
+		qs = self.qs_layer(q)			#[B,lq,dmodel]=[B,lq,heads*dk]
+		ks = self.ks_layer(k)			#[B,lk,dmodel]=[B,lk,heads*dk]
+		vs = self.vs_layer(v)			#[B,lk,dmodel]=[B,lk,heads*dv]
+
+		def reshape1(x):
+			s = tf.shape(x)  # [batch_size, len_q, n_head * d_k]
+			x = tf.reshape(x, [s[0], s[1], self.n_head, s[2] // self.n_head])	# [batch_size, len_q, n_head, d_k]
+			x = tf.transpose(x, [2, 0, 1, 3])	## [heads,batch_size, len_q,d_k]
+			x = tf.reshape(x, [-1, s[1], s[2] // self.n_head])  # [n_head * batch_size, len_q, d_k]
+			return x
+
+		qs = Lambda(reshape1)(qs)		# [n_head * batch_size, len_q, d_k]
+		ks = Lambda(reshape1)(ks)		# [n_head * batch_size, len_k, d_k]
+		vs = Lambda(reshape1)(vs)		# [n_head * batch_size, len_k, d_v]
+
+		if mask is not None:
+			mask = Lambda(lambda x: K.repeat_elements(x, self.n_head, 0))(mask)		#[batch_size*heads,lq]
+		temper = tf.sqrt(tf.cast(tf.shape(ks)[-1], dtype='float32'))		#d_k
+		attn = Lambda(lambda x: K.batch_dot(x[0], x[1], axes=[2, 2]) / temper)([qs, ks])  # shape=(batch*heads, lq, lk)
+		if mask is not None:
+			mmask = Lambda(lambda x: (-1e+9) * (1. - K.cast(x, 'float32')))(mask)
+			attn = Add()([attn, mmask])		# shape=(batch*heads, lq, lk)
+
+		def reshape2(x):
+			s = tf.shape(x)
+			x = tf.reshape(x,[s[0]//self.n_head,self.n_head,s[1],s[2]])
+			x = tf.transpose(x,[0,2,3,1])
+			return x
+
+		attn = Lambda(reshape2)(attn)		# shape=(batch_size, lq, lk,heads)
+		attn = self.ip1_dense(attn)		#[B,lq,lk,heads*heads]
+		attn = self.ip2_dense(attn)		#[B,lq,lk,heads]
+
+		def reshape3(x):
+			s = tf.shape(x)
+			x = tf.transpose(x,[0,3,1,2])
+			x = tf.reshape(x,[-1,s[1],s[2]])
+			return x
+
+		attn = Lambda(reshape3)(attn)
+		attn = Activation('softmax')(attn)
+		attn = self.dropout(attn)
+		output = Lambda(lambda x: K.batch_dot(x[0], x[1]))([attn, vs])		# shape=(batch*heads, lq, dv)
+
+		def reshape4(x):
+			s = tf.shape(x)  # [n_head * batch_size, len_v, d_v]
+			x = tf.reshape(x, [self.n_head, -1, s[1], s[2]])
+			x = tf.transpose(x, [1, 2, 0, 3])
+			x = tf.reshape(x, [-1, s[1], self.n_head*self.d_v])	# [batch_size, len_v, n_head * d_v]
+			return x
+
+		output = Lambda(reshape4)(output)	# [batch_size, len_v, n_head * d_v]
+
+		output = self.w_o(output)		# [batch_size, len_v, dmodel]
+		output = self.dropout(output)		# [batch_size, len_v, dmodel]
+		return output, attn
+
+class TalkingHeadsAttention2():
+
+    def __init__(self, n_head, d_model, dropout=0.1, **kwargs):
+        super(TalkingHeadsAttention, self).__init__(**kwargs)
+        self.n_head = n_head
+        self.d_k = self.d_v = d_k = d_v = d_model // n_head
+
+        self.qs_layer = Dense(n_head * d_k, use_bias=False)
+        self.ks_layer = Dense(n_head * d_k, use_bias=False)
+        self.vs_layer = Dense(n_head * d_v, use_bias=False)
+
+        self.ip1_dense = Dense(self.n_head * self.n_head, use_bias=False)
+        self.ip2_dense = Dense(self.n_head, use_bias=False)
+
+        self.dropout = Dropout(dropout)
+        self.w_o = TimeDistributed(Dense(d_model))
+
+    def __call__(self, q, k, v, mask=None):
+
+        '''
+        :param q: [B,lq,dmodel]
+        :param k: [B,lk,dmodel]
+        :param v: [B,lk,dmodel
+        :param mask: [B,lq]
+        :return:
+        '''
+
+        qs = self.qs_layer(q)  # [B,lq,dmodel]=[B,lq,heads*dk]
+        ks = self.ks_layer(k)  # [B,lk,dmodel]=[B,lk,heads*dk]
+        vs = self.vs_layer(v)  # [B,lk,dmodel]=[B,lk,heads*dv]
+
+        def reshape1(x):
+            s = tf.shape(x)  # [batch_size, len_q, n_head * d_k]
+            x = tf.reshape(x, [s[0], s[1], self.n_head, s[2] // self.n_head])  # [batch_size, len_q, n_head, d_k]
+            x = tf.transpose(x, [2, 0, 1, 3])  ## [heads,batch_size, len_q,d_k]
+            x = tf.reshape(x, [-1, s[1], s[2] // self.n_head])  # [n_head * batch_size, len_q, d_k]
+            return x
+
+        qs = Lambda(reshape1)(qs)  # [n_head * batch_size, len_q, d_k]
+        ks = Lambda(reshape1)(ks)  # [n_head * batch_size, len_k, d_k]
+        vs = Lambda(reshape1)(vs)  # [n_head * batch_size, len_k, d_v]
+
+        if mask is not None:
+            mask = Lambda(lambda x: K.repeat_elements(x, self.n_head, 0))(mask)  # [batch_size*heads,lq]
+        temper = tf.sqrt(tf.cast(tf.shape(ks)[-1], dtype='float32'))  # d_k
+        attn = Lambda(lambda x: K.batch_dot(x[0], x[1], axes=[2, 2]) / temper)([qs, ks])  # shape=(batch*heads, lq, lk)
+        if mask is not None:
+            mmask = Lambda(lambda x: (-1e+9) * (1. - K.cast(x, 'float32')))(mask)
+            attn = Add()([attn, mmask])  # shape=(batch*heads, lq, lk)
+
+
+        print('@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@')
+        print('@@@@@@@@@@pretalking heads@@@@@@@')
+        print('@@@@@@@@@@pretalking heads@@@@@@@')
+
+        def reshape2(x):
+            s = tf.shape(x)
+            x = tf.reshape(x, [s[0] // self.n_head, self.n_head, s[1], s[2]])
+            x = tf.transpose(x, [0, 2, 3, 1])
+            return x
+
+        def reshape3(x):
+            s = tf.shape(x)
+            x = tf.transpose(x, [0, 3, 1, 2])
+            x = tf.reshape(x, [-1, s[1], s[2]])
+            return x
+
+        attn = Lambda(reshape2)(attn)  # shape=(batch_size, lq, lk,heads)
+        attn = self.ip1_dense(attn)  # [B,lq,lk,heads*heads]
+        attn = self.ip2_dense(attn)  # [B,lq,lk,heads]
+        attn = Lambda(reshape3)(attn)       # shape=(batch*heads, lq, lk)
+        attn = Activation('softmax')(attn)      # shape=(batch*heads, lq, lk)
+
+
+        print('@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@')
+        print('@@@@@@@@posttalking heads@@@@@@@@@@@')
+        print('@@@@@@@@posttalking heads@@@@@@@@@@@')
+
+        attn = Lambda(reshape2)(attn)       # shape=(batch_size, lq, lk,heads)
+        attn = self.ip1_dense(attn)  # [B,lq,lk,heads*heads]
+        attn = self.ip2_dense(attn)  # [B,lq,lk,heads]
+        attn = Lambda(reshape3)(attn)  # shape=(batch*heads, lq, lk)
+        attn = Activation('softmax')(attn)  # shape=(batch*heads, lq, lk)
+
+
+        attn = self.dropout(attn)
+        output = Lambda(lambda x: K.batch_dot(x[0], x[1]))([attn, vs])  # shape=(batch*heads, lq, dv)
+
+        def reshape4(x):
+            s = tf.shape(x)  # [n_head * batch_size, len_v, d_v]
+            x = tf.reshape(x, [self.n_head, -1, s[1], s[2]])
+            x = tf.transpose(x, [1, 2, 0, 3])
+            x = tf.reshape(x, [-1, s[1], self.n_head * self.d_v])  # [batch_size, len_v, n_head * d_v]
+            return x
+
+        output = Lambda(reshape4)(output)  # [batch_size, len_v, n_head * d_v]
+
+        output = self.w_o(output)  # [batch_size, len_v, dmodel]
+        output = self.dropout(output)  # [batch_size, len_v, dmodel]
+        return output, attn
