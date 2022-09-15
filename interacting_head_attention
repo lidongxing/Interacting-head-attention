@@ -1,0 +1,98 @@
+class InteractingHeads():
+	def __init__(self, heads,d_model, dropout=0.1):
+		self.heads = heads
+		print('000000000000000')
+		print(self.heads)
+
+		self.d_k = self.d_v = d_k = d_v = d_model // heads
+
+		self.qs_layer = Dense(heads * d_k, use_bias=False)
+		self.ks_layer = Dense(heads * d_k, use_bias=False)
+		self.vs_layer = Dense(heads * d_v, use_bias=False)
+
+		self.dropout = Dropout(dropout)
+		self.w_o = TimeDistributed(Dense(d_model))
+
+	def __call__(self,q, k, v, mask=None):
+		'''
+		:param q: [batch_size,lq,dmodel]
+		:param k: [batch_size,lk,dmodel]
+		:param v: [batch_size,lk,dmodel]
+		:param mask: encoder_self_mask:[batch_size,lq]  decoder_self_mask:[batch_size,lq,lq]
+					decoder_encoder_mask:[batch_size,lq,lk]
+		:return:[batch_size,lq,dmodel]
+		'''
+
+		qs = self.qs_layer(q)  # [B,lq,dmodel]=[B,lq,heads*dk]
+		ks = self.ks_layer(k)  # [B,lk,dmodel]=[B,lk,heads*dk]
+		vs = self.vs_layer(v)  # [B,lk,dmodel]=[B,lk,heads*dv]
+
+		def reshape1(x):
+			s = tf.shape(x)
+			x = tf.reshape(x, [s[0], s[1], self.heads, s[2] // self.heads])
+			x = tf.transpose(x, [0, 2, 1, 3])
+			return x
+
+		qs = Lambda(reshape1)(qs)  # [batch,head, lq,dk]
+		ks = Lambda(reshape1)(ks)  # [batch,head, lk,dk]
+		vs = Lambda(reshape1)(vs)  # [batch,head, lk,dv]
+
+
+
+		temper = tf.sqrt(tf.cast(tf.shape(ks)[-1], dtype='float32')) #[dk]
+
+
+
+		attn = []  # heads*heads attention
+		for i in range(self.heads):
+			for j in range(self.heads):
+				a_ij = Lambda(lambda x: K.batch_dot(x[0][:, i, :, :], x[1][:, j, :, :],axes=[2,2]) / temper)([qs, ks])  # [batch_size,len_q,len_k]
+				if mask is not None:
+					mmask = Lambda(lambda x: (-1e+9) * (1. - K.cast(x, 'float32')))(mask)  # [batch_size,lq]
+					a_ij = Add()([a_ij, mmask])		# [batch_size,qlen,klen]
+				# a_ij = Activation('softmax')(a_ij)
+				# a_ij = self.dropout(a_ij)
+				a_ij = Lambda(lambda x: K.expand_dims(x, axis=1))(a_ij)  # [batch_size,1,qlen,klen]
+				attn.append(a_ij)
+		outputs = []
+		attns = []
+		j = 0
+		while True:
+			if (j != 0) and (j % self.heads == 0):
+				break
+			temp_a = []
+			for i in range(self.heads):
+				a = attn[i * self.heads + j]  # [batch_size,1,qlen,klen]
+				temp_a.append(a)
+			sm = Add()([x for x in temp_a]) #[batch_size,1,qlen,klen]
+			sm = Activation('softmax')(sm)
+			sm = self.dropout(sm)
+			output = Lambda(lambda x: K.batch_dot(x[0][:, 0, :, :], x[1][:, j, :, :],axes=[2,1]))([sm, vs])  # [batch_size,qlen,dv]
+
+			output = Lambda(lambda x: K.expand_dims(x, axis=0))(output) #[1,batch_size,qlen,dv]
+			sm = Lambda(lambda x: K.permute_dimensions(x,(1,0,2,3)))(sm)
+			outputs.append(output)
+			attns.append(sm)
+			j = j + 1
+
+		# len(attns)=heads, attns[0]# [1,batch_size,qlen,klen]
+		attns = Lambda(lambda x:K.concatenate(x,axis=0))([x for x in attns])		#[heads,batch_size,qlen,klen]
+
+		def reshape2(x):
+			s = tf.shape(x)
+			x = tf.reshape(x,[-1,s[2],s[3]])
+			return x
+		attns = Lambda(reshape2)(attns)				#[heads*batch_size,qlen,klen]
+
+		outputs = Lambda(lambda x: K.concatenate(x, axis=0))([x for x in outputs])  # [heads,batch_size,qlen,dv]
+
+		def reshape3(x):
+			s = tf.shape(x)			# [heads,batch_size,qlen,dv]
+			x = tf.transpose(x,[1,2,0,3])		# [batch_size,qlen,dv,heads]
+			x = tf.reshape(x, [s[1], s[2], self.d_v*self.heads])  # [batch, qlen,dmodel]
+			return x
+
+		ret = Lambda(reshape3)(outputs)		# [batch, qlen,dmodel]
+		ret = self.dropout(ret) # [batch, qlen,dmodel]
+		return ret, attns			# attn:shape=(batch*heads, lq, lk)  ret:[batch_size, len_v, dmodel]
+
